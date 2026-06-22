@@ -175,21 +175,83 @@ class JMCosmosPlugin(Star):
 
     def _prepare_platform_file_send(self, event: AstrMessageEvent) -> None:
         """为平台文件上传应用必要的兼容参数。"""
-        if event.get_platform_name() != "qq_official":
-            return
+        pn = event.get_platform_name()
 
-        # AstrBot v4.25.6 的 QQ 官方适配器将 botpy HTTP 总超时固定为 20 秒。
-        # 本地文件会先转为 Base64 再上传，数 MB 文件在网络稍慢时就会在
-        # /v2/groups/.../files 阶段超时。提升当前 bot 客户端的全局超时，
-        # 不改变消息内容、审核规则或重试策略。
-        try:
-            http = event.bot.api._http
-            current = int(getattr(http, "timeout", 0) or 0)
-            if current < 120:
-                http.timeout = 120
-                logger.info("QQ 官方平台：文件上传超时已调整为 120 秒")
-        except Exception as e:
-            logger.debug(f"调整 QQ 官方文件上传超时失败（继续使用平台默认值）: {e}")
+        if pn == "qq_official":
+            # AstrBot v4.25.6 的 QQ 官方适配器将 botpy HTTP 总超时固定为 20 秒。
+            # 本地文件会先转为 Base64 再上传，数 MB 文件在网络稍慢时就会在
+            # /v2/groups/.../files 阶段超时。提升当前 bot 客户端的全局超时，
+            # 不改变消息内容、审核规则或重试策略。
+            try:
+                http = event.bot.api._http
+                current = int(getattr(http, "timeout", 0) or 0)
+                if current < 120:
+                    http.timeout = 120
+                    logger.info("QQ 官方平台：文件上传超时已调整为 120 秒")
+            except Exception as e:
+                logger.debug(f"调整 QQ 官方文件上传超时失败（继续使用平台默认值）: {e}")
+
+        elif pn == "telegram":
+            # python-telegram-bot 的 httpx 默认 write 超时约 20s，
+            # 数 MB 的 ZIP/PDF 上传到 Telegram Bot API 时容易 WriteTimeout。
+            # 提升底層 httpx 客户端超时，不改动消息内容或发送策略。
+            try:
+                client = getattr(event, "client", None)
+                if client is None:
+                    return
+                req = getattr(client, "_request", None)
+                if req is None:
+                    return
+                http = getattr(req, "_client", None)
+                if http is None:
+                    return
+                import httpx
+
+                http.timeout = httpx.Timeout(120.0, write=120.0, connect=10.0)
+                logger.info("Telegram 平台：文件上传超时已调整为 120 秒")
+            except Exception as e:
+                logger.debug(
+                    f"调整 Telegram 文件上传超时失败（继续使用平台默认值）: {e}"
+                )
+
+    def _get_max_file_size_mb(self, event: AstrMessageEvent, save_path: "Path") -> int:
+        """计算打包分卷大小阈值，QQ 官方平台额外考虑被动回复次数限制。
+
+        Returns:
+            分卷阈值（MB），0 表示不拆分 / 非 QQ 平台。
+        """
+        if event.get_platform_name() != "qq_official":
+            return 0
+
+        limit = self.config_manager.qq_file_size_limit_mb
+        if limit <= 0:
+            return 0
+
+        max_parts = self.config_manager.qq_max_parts
+        if max_parts <= 0:
+            return limit
+
+        # 估算下载文件总大小
+        total_bytes = sum(
+            f.stat().st_size for f in save_path.rglob("*") if f.is_file()
+        )
+        total_mb = total_bytes / (1024 * 1024) if total_bytes > 0 else 0
+        est_parts = (
+            max(1, int(total_mb / limit) + (1 if total_mb % limit else 0))
+            if total_mb > 0
+            else 1
+        )
+
+        if est_parts <= max_parts:
+            return limit
+
+        # 调整阈值以控制卷数：宁可单卷偏大（可能 413），也不能超过回复上限
+        adjusted = int(total_mb / max_parts) + 1
+        logger.warning(
+            f"QQ官方：按 {limit}MB 将拆为 ~{est_parts} 卷，超过上限 {max_parts}；"
+            f"单卷调整为 {adjusted}MB（可能触发 413）"
+        )
+        return adjusted
 
     def _reserve_quota(self, event: AstrMessageEvent) -> tuple[bool, str, bool]:
         """
@@ -327,9 +389,7 @@ class JMCosmosPlugin(Star):
             )
 
             # 打包文件
-            max_size_mb = 0
-            if event.get_platform_name() == "qq_official":
-                max_size_mb = self.config_manager.qq_file_size_limit_mb
+            max_size_mb = self._get_max_file_size_mb(event, result.save_path)
 
             packer = JMPacker(
                 pack_format=self.config_manager.pack_format,
@@ -451,9 +511,7 @@ class JMCosmosPlugin(Star):
             )
 
             # 打包
-            max_size_mb = 0
-            if event.get_platform_name() == "qq_official":
-                max_size_mb = self.config_manager.qq_file_size_limit_mb
+            max_size_mb = self._get_max_file_size_mb(event, result.save_path)
 
             packer = JMPacker(
                 pack_format=self.config_manager.pack_format,
@@ -1178,9 +1236,7 @@ class JMCosmosPlugin(Star):
                 password=self.config_manager.pack_password,
                 show_password=self.config_manager.filename_show_password,
             )
-            max_size_mb = 0
-            if event.get_platform_name() == "qq_official":
-                max_size_mb = self.config_manager.qq_file_size_limit_mb
+            max_size_mb = self._get_max_file_size_mb(event, result.save_path)
 
             packer = JMPacker(
                 pack_format=self.config_manager.pack_format,
@@ -1222,9 +1278,11 @@ class JMCosmosPlugin(Star):
         self._prepare_platform_file_send(event)
         paths = pack_result.output_paths
         multi = len(paths) > 1
+        # QQ 官方被动回复限制 ~5 条/用户消息，多卷时优先尝试主动推送
+        qq_active = multi and event.get_platform_name() == "qq_official"
+        qq_active_ok = qq_active  # 首卷先尝试主动推送，失败则后续全部回退
 
         for i, path in enumerate(paths, 1):
-            # 多卷时第一份带结果信息，后续仅带序号前缀
             if multi:
                 prefix = f"[{i}/{len(paths)}] "
             else:
@@ -1243,6 +1301,27 @@ class JMCosmosPlugin(Star):
                     ),
                 ]
             )
+
+            if qq_active_ok:
+                # QQ 官方多卷 → 主动推送，绕过被动回复次数限制
+                if self.config_manager.auto_recall_enabled:
+                    logger.info(
+                        "QQ 官方主动推送不支持自动撤回，将直接发送"
+                    )
+                try:
+                    await self.context.send_message(
+                        event.unified_msg_origin, file_chain
+                    )
+                    logger.debug(
+                        f"QQ官方主动推送: [{i}/{len(paths)}] {path.name}"
+                    )
+                    continue
+                except Exception as e:
+                    logger.warning(
+                        f"QQ官方主动推送失败，后续改用被动回复: {e}"
+                    )
+                    qq_active_ok = False
+                    # fall through to passive reply below
 
             if self.config_manager.auto_recall_enabled:
                 await send_with_recall(

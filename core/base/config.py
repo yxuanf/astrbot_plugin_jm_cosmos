@@ -104,6 +104,11 @@ class JMConfigManager:
         return self.plugin_config.get("qq_file_size_limit_mb", 5)
 
     @property
+    def qq_max_parts(self) -> int:
+        """QQ 官方平台单次下载最大分卷数，超过时自动提高单卷阈值（被动回复限制 ≈5）"""
+        return self.plugin_config.get("qq_max_parts", 5)
+
+    @property
     def auto_delete_after_send(self) -> bool:
         """发送后是否自动删除"""
         return self.plugin_config.get("auto_delete_after_send", True)
