@@ -175,5 +175,11 @@
     "description": "调试模式",
     "hint": "开启后会输出详细的调试日志",
     "default": false
+  },
+  "qq_file_size_limit_mb": {
+    "type": "int",
+    "description": "QQ官方平台上传文件大小上限(MB)",
+    "hint": "QQ官方平台(stgw网关)对单次上传有body大小限制(通常约5MB)。当打包文件超过此值时，自动拆分为多卷独立文件分批发送(如 xxx_part1.zip, xxx_part2.zip)。设为0则不拆分。非QQ官方平台忽略此配置",
+    "default": 5
   }
 }

@@ -327,6 +327,10 @@ class JMCosmosPlugin(Star):
             )
 
             # 打包文件
+            max_size_mb = 0
+            if event.get_platform_name() == "qq_official":
+                max_size_mb = self.config_manager.qq_file_size_limit_mb
+
             packer = JMPacker(
                 pack_format=self.config_manager.pack_format,
                 password=self.config_manager.pack_password,
@@ -335,49 +339,11 @@ class JMCosmosPlugin(Star):
             pack_result = packer.pack(
                 source_dir=result.save_path,
                 output_name=output_name,
+                max_file_size_mb=max_size_mb,
             )
 
-            result_msg = MessageFormatter.format_download_result(result, pack_result)
-
-            if (
-                pack_result.success
-                and pack_result.output_path
-                and pack_result.format != "none"
-            ):
-                # 构建文件路径 - 调试输出
-                file_path_str = str(pack_result.output_path)
-                logger.info(f"准备发送文件: {file_path_str}")
-
-                # 构建消息链
-                from astrbot.api.event import MessageChain
-
-                file_chain = MessageChain(
-                    [
-                        Comp.Plain(result_msg),
-                        Comp.File(
-                            name=pack_result.output_path.name,
-                            file=file_path_str,
-                        ),
-                    ]
-                )
-
-                self._prepare_platform_file_send(event)
-
-                if self.config_manager.auto_recall_enabled:
-                    await send_with_recall(
-                        event,
-                        file_chain,
-                        self.config_manager.auto_recall_delay,
-                    )
-                else:
-                    yield event.chain_result(file_chain.chain)
-
-                # 自动清理
-                if self.config_manager.auto_delete_after_send:
-                    JMPacker.cleanup(result.save_path)
-                    JMPacker.cleanup(pack_result.output_path)
-            else:
-                yield event.plain_result(result_msg)
+            async for msg in self._emit_packed_file(event, result, pack_result):
+                yield msg
 
         except Exception as e:
             logger.error(f"下载本子失败: {e}")
@@ -485,6 +451,10 @@ class JMCosmosPlugin(Star):
             )
 
             # 打包
+            max_size_mb = 0
+            if event.get_platform_name() == "qq_official":
+                max_size_mb = self.config_manager.qq_file_size_limit_mb
+
             packer = JMPacker(
                 pack_format=self.config_manager.pack_format,
                 password=self.config_manager.pack_password,
@@ -493,47 +463,11 @@ class JMCosmosPlugin(Star):
             pack_result = packer.pack(
                 source_dir=result.save_path,
                 output_name=output_name,
+                max_file_size_mb=max_size_mb,
             )
 
-            result_msg = MessageFormatter.format_download_result(result, pack_result)
-
-            if (
-                pack_result.success
-                and pack_result.output_path
-                and pack_result.format != "none"
-            ):
-                file_path_str = str(pack_result.output_path)
-                logger.info(f"准备发送章节文件: {file_path_str}")
-
-                # 构建消息链
-                from astrbot.api.event import MessageChain
-
-                file_chain = MessageChain(
-                    [
-                        Comp.Plain(result_msg),
-                        Comp.File(
-                            name=pack_result.output_path.name,
-                            file=file_path_str,
-                        ),
-                    ]
-                )
-
-                self._prepare_platform_file_send(event)
-
-                if self.config_manager.auto_recall_enabled:
-                    await send_with_recall(
-                        event,
-                        file_chain,
-                        self.config_manager.auto_recall_delay,
-                    )
-                else:
-                    yield event.chain_result(file_chain.chain)
-
-                if self.config_manager.auto_delete_after_send:
-                    JMPacker.cleanup(result.save_path)
-                    JMPacker.cleanup(pack_result.output_path)
-            else:
-                yield event.plain_result(result_msg)
+            async for msg in self._emit_packed_file(event, result, pack_result):
+                yield msg
 
         except Exception as e:
             logger.error(f"下载章节失败: {e}")
@@ -1244,12 +1178,18 @@ class JMCosmosPlugin(Star):
                 password=self.config_manager.pack_password,
                 show_password=self.config_manager.filename_show_password,
             )
+            max_size_mb = 0
+            if event.get_platform_name() == "qq_official":
+                max_size_mb = self.config_manager.qq_file_size_limit_mb
+
             packer = JMPacker(
                 pack_format=self.config_manager.pack_format,
                 password=self.config_manager.pack_password,
             )
             pack_result = packer.pack(
-                source_dir=result.save_path, output_name=output_name
+                source_dir=result.save_path,
+                output_name=output_name,
+                max_file_size_mb=max_size_mb,
             )
 
             # 同步更新订阅记录的已知章节数
@@ -1268,27 +1208,41 @@ class JMCosmosPlugin(Star):
                 self._refund_quota(event, quota_reserved)
 
     async def _emit_packed_file(self, event: AstrMessageEvent, result, pack_result):
-        """统一处理打包文件的发送（含自动撤回与清理），供下载类命令复用"""
+        """统一处理打包文件的发送（含自动撤回与清理，支持多卷分批），供下载类命令复用"""
         result_msg = MessageFormatter.format_download_result(result, pack_result)
 
-        if (
+        if not (
             pack_result.success
-            and pack_result.output_path
+            and pack_result.output_paths
             and pack_result.format != "none"
         ):
+            yield event.plain_result(result_msg)
+            return
+
+        self._prepare_platform_file_send(event)
+        paths = pack_result.output_paths
+        multi = len(paths) > 1
+
+        for i, path in enumerate(paths, 1):
+            # 多卷时第一份带结果信息，后续仅带序号前缀
+            if multi:
+                prefix = f"[{i}/{len(paths)}] "
+            else:
+                prefix = ""
+
             from astrbot.api.event import MessageChain
 
             file_chain = MessageChain(
                 [
-                    Comp.Plain(result_msg),
+                    Comp.Plain(
+                        prefix + result_msg if i == 1 else prefix.rstrip()
+                    ),
                     Comp.File(
-                        name=pack_result.output_path.name,
-                        file=str(pack_result.output_path),
+                        name=path.name,
+                        file=str(path),
                     ),
                 ]
             )
-
-            self._prepare_platform_file_send(event)
 
             if self.config_manager.auto_recall_enabled:
                 await send_with_recall(
@@ -1297,11 +1251,10 @@ class JMCosmosPlugin(Star):
             else:
                 yield event.chain_result(file_chain.chain)
 
-            if self.config_manager.auto_delete_after_send:
-                JMPacker.cleanup(result.save_path)
-                JMPacker.cleanup(pack_result.output_path)
-        else:
-            yield event.plain_result(result_msg)
+        if self.config_manager.auto_delete_after_send:
+            JMPacker.cleanup(result.save_path)
+            for p in paths:
+                JMPacker.cleanup(p)
 
     # ==================== 订阅后台检查 ====================
 

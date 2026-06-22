@@ -99,6 +99,11 @@ class JMConfigManager:
         return self.plugin_config.get("filename_show_password", False)
 
     @property
+    def qq_file_size_limit_mb(self) -> int:
+        """QQ 官方平台上传文件大小上限（MB），超出将分批次发送多卷文件；0=不限制"""
+        return self.plugin_config.get("qq_file_size_limit_mb", 5)
+
+    @property
     def auto_delete_after_send(self) -> bool:
         """发送后是否自动删除"""
         return self.plugin_config.get("auto_delete_after_send", True)

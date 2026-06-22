@@ -5,7 +5,7 @@ JMComic 打包模块 - 支持加密ZIP和PDF
 import os
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
@@ -70,6 +70,7 @@ class PackResult:
     output_path: Path | None
     format: str
     encrypted: bool
+    output_paths: list[Path] = field(default_factory=list)
     error_message: str | None = None
 
 
@@ -88,7 +89,11 @@ class JMPacker:
         self.password = password
 
     def pack(
-        self, source_dir: Path, output_name: str, output_dir: Path | None = None
+        self,
+        source_dir: Path,
+        output_name: str,
+        output_dir: Path | None = None,
+        max_file_size_mb: int = 0,
     ) -> PackResult:
         """
         打包目录
@@ -97,10 +102,13 @@ class JMPacker:
             source_dir: 源目录
             output_name: 输出文件名（不含扩展名）
             output_dir: 输出目录，默认为源目录的父目录
+            max_file_size_mb: 文件大小上限（MB），>0 时自动分组打包；0=单文件
 
         Returns:
-            PackResult 打包结果
+            PackResult 打包结果（output_paths 包含所有卷文件路径）
         """
+        max_bytes = int(max_file_size_mb) * 1024 * 1024 if max_file_size_mb else 0
+
         if not source_dir.exists():
             return PackResult(
                 success=False,
@@ -116,14 +124,18 @@ class JMPacker:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         if self.pack_format == "zip":
-            return self._pack_zip(source_dir, output_name, output_dir)
+            return self._pack_zip(source_dir, output_name, output_dir, max_bytes)
         elif self.pack_format == "pdf":
-            return self._pack_pdf(source_dir, output_name, output_dir)
+            return self._pack_pdf(source_dir, output_name, output_dir, max_bytes)
         elif self.pack_format == "long_img":
-            return self._pack_long_img(source_dir, output_name, output_dir)
+            return self._pack_long_img(source_dir, output_name, output_dir, max_bytes)
         elif self.pack_format == "none":
             return PackResult(
-                success=True, output_path=source_dir, format="none", encrypted=False
+                success=True,
+                output_path=source_dir,
+                output_paths=[source_dir],
+                format="none",
+                encrypted=False,
             )
         else:
             return PackResult(
@@ -135,11 +147,9 @@ class JMPacker:
             )
 
     def _pack_zip(
-        self, source_dir: Path, output_name: str, output_dir: Path
+        self, source_dir: Path, output_name: str, output_dir: Path, max_bytes: int = 0
     ) -> PackResult:
-        """打包为ZIP"""
-        output_path = output_dir / f"{output_name}.zip"
-
+        """打包为 ZIP；max_bytes > 0 时分卷打包，每卷独立可读"""
         # 请求了加密但缺少 pyzipper：失败关闭，不静默产出未加密压缩包
         if self.password and not PYZIPPER_AVAILABLE:
             return PackResult(
@@ -153,40 +163,62 @@ class JMPacker:
                 ),
             )
 
-        try:
-            if self.password:
-                # 使用pyzipper创建加密ZIP
-                with pyzipper.AESZipFile(
-                    output_path,
-                    "w",
-                    compression=pyzipper.ZIP_DEFLATED,
-                    encryption=pyzipper.WZ_AES,
-                ) as zf:
-                    zf.setpassword(self.password.encode("utf-8"))
-                    for root, dirs, files in os.walk(source_dir):
-                        for file in files:
-                            file_path = Path(root) / file
-                            arcname = file_path.relative_to(source_dir)
-                            zf.write(file_path, arcname)
-            else:
-                # 使用标准库创建普通ZIP
-                import zipfile
+        image_files = _collect_images_sorted(source_dir)
+        if not image_files:
+            return PackResult(
+                success=False,
+                output_path=None,
+                format="zip",
+                encrypted=False,
+                error_message="未找到图片文件",
+            )
 
-                with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for root, dirs, files in os.walk(source_dir):
-                        for file in files:
-                            file_path = Path(root) / file
-                            arcname = file_path.relative_to(source_dir)
-                            zf.write(file_path, arcname)
+        groups = self._split_files_into_size_groups(image_files, max_bytes)
+
+        output_paths: list[Path] = []
+        try:
+            for i, group in enumerate(groups, 1):
+                if len(groups) > 1:
+                    filename = f"{output_name}_part{i}.zip"
+                else:
+                    filename = f"{output_name}.zip"
+                group_path = output_dir / filename
+
+                if self.password:
+                    # 使用pyzipper创建加密ZIP
+                    with pyzipper.AESZipFile(
+                        group_path,
+                        "w",
+                        compression=pyzipper.ZIP_DEFLATED,
+                        encryption=pyzipper.WZ_AES,
+                    ) as zf:
+                        zf.setpassword(self.password.encode("utf-8"))
+                        for fp in group:
+                            zf.write(fp, fp.relative_to(source_dir))
+                else:
+                    # 使用标准库创建普通ZIP
+                    import zipfile
+
+                    with zipfile.ZipFile(
+                        group_path, "w", zipfile.ZIP_DEFLATED
+                    ) as zf:
+                        for fp in group:
+                            zf.write(fp, fp.relative_to(source_dir))
+
+                output_paths.append(group_path)
 
             return PackResult(
                 success=True,
-                output_path=output_path,
+                output_path=output_paths[0],
+                output_paths=output_paths,
                 format="zip",
                 encrypted=bool(self.password),
             )
 
         except Exception as e:
+            # 清理已生成的部分文件
+            for p in output_paths:
+                self.cleanup(p)
             return PackResult(
                 success=False,
                 output_path=None,
@@ -196,9 +228,9 @@ class JMPacker:
             )
 
     def _pack_pdf(
-        self, source_dir: Path, output_name: str, output_dir: Path
+        self, source_dir: Path, output_name: str, output_dir: Path, max_bytes: int = 0
     ) -> PackResult:
-        """打包为PDF"""
+        """打包为 PDF；max_bytes > 0 时分卷打包，每卷独立可读"""
         if not PYMUPDF_AVAILABLE:
             return PackResult(
                 success=False,
@@ -208,41 +240,64 @@ class JMPacker:
                 error_message="pymupdf 库未安装，无法创建PDF",
             )
 
-        output_path = output_dir / f"{output_name}.pdf"
+        # 收集所有图片文件（自然顺序，正确跨章节排序）
+        image_files = _collect_images_sorted(source_dir)
 
+        if not image_files:
+            return PackResult(
+                success=False,
+                output_path=None,
+                format="pdf",
+                encrypted=False,
+                error_message="未找到图片文件",
+            )
+
+        groups = self._split_files_into_size_groups(image_files, max_bytes)
+
+        output_paths: list[Path] = []
         try:
-            # 收集所有图片文件（自然顺序，正确跨章节排序）
-            image_files = _collect_images_sorted(source_dir)
+            for i, group in enumerate(groups, 1):
+                if len(groups) > 1:
+                    filename = f"{output_name}_part{i}.pdf"
+                else:
+                    filename = f"{output_name}.pdf"
+                group_path = output_dir / filename
 
-            if not image_files:
-                return PackResult(
-                    success=False,
-                    output_path=None,
-                    format="pdf",
-                    encrypted=False,
-                    error_message="未找到图片文件",
-                )
+                # 创建PDF
+                doc = fitz.open()
 
-            # 创建PDF
-            doc = fitz.open()
+                for img_path in group:
+                    try:
+                        img = fitz.open(img_path)
+                        pdfbytes = img.convert_to_pdf()
+                        img.close()
 
-            for img_path in image_files:
-                try:
-                    # 打开图片
-                    img = fitz.open(img_path)
-                    # 将图片转换为PDF页面
-                    pdfbytes = img.convert_to_pdf()
-                    img.close()
+                        imgpdf = fitz.open("pdf", pdfbytes)
+                        doc.insert_pdf(imgpdf)
+                        imgpdf.close()
+                    except Exception:
+                        continue  # 跳过无法处理的图片
 
-                    # 插入页面
-                    imgpdf = fitz.open("pdf", pdfbytes)
-                    doc.insert_pdf(imgpdf)
-                    imgpdf.close()
-                except Exception:
-                    continue  # 跳过无法处理的图片
+                if doc.page_count == 0:
+                    doc.close()
+                    continue  # 该组无可处理图片，跳过
 
-            if doc.page_count == 0:
+                # 保存PDF（可选加密）
+                if self.password:
+                    doc.save(
+                        group_path,
+                        encryption=fitz.PDF_ENCRYPT_AES_256,
+                        owner_pw=self.password,
+                        user_pw=self.password,
+                        permissions=fitz.PDF_PERM_ACCESSIBILITY,
+                    )
+                else:
+                    doc.save(group_path)
+
                 doc.close()
+                output_paths.append(group_path)
+
+            if not output_paths:
                 return PackResult(
                     success=False,
                     output_path=None,
@@ -251,28 +306,17 @@ class JMPacker:
                     error_message="无法创建PDF页面",
                 )
 
-            # 保存PDF（可选加密）
-            if self.password:
-                doc.save(
-                    output_path,
-                    encryption=fitz.PDF_ENCRYPT_AES_256,
-                    owner_pw=self.password,
-                    user_pw=self.password,
-                    permissions=fitz.PDF_PERM_ACCESSIBILITY,
-                )
-            else:
-                doc.save(output_path)
-
-            doc.close()
-
             return PackResult(
                 success=True,
-                output_path=output_path,
+                output_path=output_paths[0],
+                output_paths=output_paths,
                 format="pdf",
                 encrypted=bool(self.password),
             )
 
         except Exception as e:
+            for p in output_paths:
+                self.cleanup(p)
             return PackResult(
                 success=False,
                 output_path=None,
@@ -282,9 +326,9 @@ class JMPacker:
             )
 
     def _pack_long_img(
-        self, source_dir: Path, output_name: str, output_dir: Path
+        self, source_dir: Path, output_name: str, output_dir: Path, max_bytes: int = 0
     ) -> PackResult:
-        """打包为长图：纵向拼接图片，过长自动分段，多段则打包为 ZIP"""
+        """打包为长图：纵向拼接图片，过长自动分段；超出大小上限时分卷打包"""
         if not PIL_AVAILABLE:
             return PackResult(
                 success=False,
@@ -327,7 +371,7 @@ class JMPacker:
             )
 
         try:
-            # 单段：直接输出一张长图
+            # 单段：直接输出一张长图（strip 已有高度限制，通常已控制在合理大小）
             if len(strips) == 1:
                 output_path = output_dir / f"{output_name}.png"
                 strips[0].save(output_path)
@@ -335,11 +379,12 @@ class JMPacker:
                 return PackResult(
                     success=True,
                     output_path=output_path,
+                    output_paths=[output_path],
                     format="long_img",
                     encrypted=False,
                 )
 
-            # 多段：先落地为多张 png，再复用 ZIP 打包逻辑（支持加密）
+            # 多段：先落地为多张 png，再复用 ZIP 打包逻辑（支持加密和分卷）
             import tempfile
 
             tmp_dir = Path(tempfile.mkdtemp(prefix="jm_longimg_"))
@@ -347,10 +392,13 @@ class JMPacker:
                 for index, strip in enumerate(strips, 1):
                     strip.save(tmp_dir / f"{output_name}_{index:03d}.png")
                     strip.close()
-                zip_result = self._pack_zip(tmp_dir, output_name, output_dir)
+                zip_result = self._pack_zip(
+                    tmp_dir, output_name, output_dir, max_bytes
+                )
                 return PackResult(
                     success=zip_result.success,
                     output_path=zip_result.output_path,
+                    output_paths=zip_result.output_paths,
                     format="long_img",
                     encrypted=zip_result.encrypted,
                     error_message=zip_result.error_message,
@@ -412,6 +460,36 @@ class JMPacker:
             offset_y += im.height
             im.close()
         return canvas
+
+    @staticmethod
+    def _split_files_into_size_groups(
+        files: list[Path], max_bytes: int
+    ) -> list[list[Path]]:
+        """按累计文件字节数将文件列表拆分为多组，每组总大小 < max_bytes。
+
+        单文件超过 max_bytes 时自成一组（无法再拆分），保证不会丢文件。
+        max_bytes <= 0 时返回原始列表作为单独一组。
+        """
+        if max_bytes <= 0 or not files:
+            return [files]
+
+        groups: list[list[Path]] = []
+        current_group: list[Path] = []
+        current_size = 0
+
+        for fp in files:
+            f_size = fp.stat().st_size
+            if current_group and current_size + f_size > max_bytes:
+                groups.append(current_group)
+                current_group = []
+                current_size = 0
+            current_group.append(fp)
+            current_size += f_size
+
+        if current_group:
+            groups.append(current_group)
+
+        return groups
 
     @staticmethod
     def cleanup(path: Path) -> bool:
