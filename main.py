@@ -143,7 +143,14 @@ class JMCosmosPlugin(Star):
 
     def _make_progress_callback(self, event: AstrMessageEvent):
         """构建下载进度回调（受配置开关控制），未启用时返回 None"""
-        if not self.config_manager.show_download_progress:
+        # QQ 官方机器人把 event.send 视为对原消息的被动回复，单个事件存在
+        # 回复次数与有效时间限制。下载过程中的多条进度会提前耗尽额度，导致
+        # 最终文件发送时报“被动回复时间或者次数超过限制”。该平台只保留
+        # 开始/预览等少量提示，并将最终文件改走主动会话发送。
+        if (
+            not self.config_manager.show_download_progress
+            or event.get_platform_name() == "qq_official"
+        ):
             return None
 
         from astrbot.api.event import MessageChain
@@ -165,6 +172,22 @@ class JMCosmosPlugin(Star):
                 logger.debug(f"发送下载进度失败: {send_err}")
 
         return _on_progress
+
+    async def _send_qqofficial_file(self, event, file_chain) -> bool:
+        """QQ 官方平台通过主动会话通道发送最终文件。
+
+        AstrBot 的 qqofficial 适配器在主动发送文件时会移除原事件 msg_id，
+        避免耗时下载完成后继续使用已过期或已超次数的被动回复额度。
+
+        Returns:
+            当前平台是否已由此方法处理。
+        """
+        if event.get_platform_name() != "qq_official":
+            return False
+
+        logger.info("QQ 官方平台：使用主动会话通道发送下载文件")
+        await self.context.send_message(event.unified_msg_origin, file_chain)
+        return True
 
     def _reserve_quota(self, event: AstrMessageEvent) -> tuple[bool, str, bool]:
         """
@@ -333,8 +356,10 @@ class JMCosmosPlugin(Star):
                     ]
                 )
 
-                # 根据配置决定是否使用自动撤回
-                if self.config_manager.auto_recall_enabled:
+                # QQ 官方的耗时任务最终文件需走主动发送，避免被动回复超限。
+                if await self._send_qqofficial_file(event, file_chain):
+                    pass
+                elif self.config_manager.auto_recall_enabled:
                     await send_with_recall(
                         event,
                         file_chain,
@@ -489,8 +514,10 @@ class JMCosmosPlugin(Star):
                     ]
                 )
 
-                # 根据配置决定是否使用自动撤回
-                if self.config_manager.auto_recall_enabled:
+                # QQ 官方的耗时任务最终文件需走主动发送，避免被动回复超限。
+                if await self._send_qqofficial_file(event, file_chain):
+                    pass
+                elif self.config_manager.auto_recall_enabled:
                     await send_with_recall(
                         event,
                         file_chain,
@@ -1255,7 +1282,9 @@ class JMCosmosPlugin(Star):
                 ]
             )
 
-            if self.config_manager.auto_recall_enabled:
+            if await self._send_qqofficial_file(event, file_chain):
+                pass
+            elif self.config_manager.auto_recall_enabled:
                 await send_with_recall(
                     event, file_chain, self.config_manager.auto_recall_delay
                 )
