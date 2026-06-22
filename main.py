@@ -145,8 +145,8 @@ class JMCosmosPlugin(Star):
         """构建下载进度回调（受配置开关控制），未启用时返回 None"""
         # QQ 官方机器人把 event.send 视为对原消息的被动回复，单个事件存在
         # 回复次数与有效时间限制。下载过程中的多条进度会提前耗尽额度，导致
-        # 最终文件发送时报“被动回复时间或者次数超过限制”。该平台只保留
-        # 开始/预览等少量提示，并将最终文件改走主动会话发送。
+        # 最终文件发送时报“被动回复时间或者次数超过限制”。该平台禁用进度，
+        # 为不具备主动消息权限的机器人保留最终被动回复额度。
         if (
             not self.config_manager.show_download_progress
             or event.get_platform_name() == "qq_official"
@@ -173,21 +173,23 @@ class JMCosmosPlugin(Star):
 
         return _on_progress
 
-    async def _send_qqofficial_file(self, event, file_chain) -> bool:
-        """QQ 官方平台通过主动会话通道发送最终文件。
-
-        AstrBot 的 qqofficial 适配器在主动发送文件时会移除原事件 msg_id，
-        避免耗时下载完成后继续使用已过期或已超次数的被动回复额度。
-
-        Returns:
-            当前平台是否已由此方法处理。
-        """
+    def _prepare_platform_file_send(self, event: AstrMessageEvent) -> None:
+        """为平台文件上传应用必要的兼容参数。"""
         if event.get_platform_name() != "qq_official":
-            return False
+            return
 
-        logger.info("QQ 官方平台：使用主动会话通道发送下载文件")
-        await self.context.send_message(event.unified_msg_origin, file_chain)
-        return True
+        # AstrBot v4.25.6 的 QQ 官方适配器将 botpy HTTP 总超时固定为 20 秒。
+        # 本地文件会先转为 Base64 再上传，数 MB 文件在网络稍慢时就会在
+        # /v2/groups/.../files 阶段超时。提升当前 bot 客户端的全局超时，
+        # 不改变消息内容、审核规则或重试策略。
+        try:
+            http = event.bot.api._http
+            current = int(getattr(http, "timeout", 0) or 0)
+            if current < 120:
+                http.timeout = 120
+                logger.info("QQ 官方平台：文件上传超时已调整为 120 秒")
+        except Exception as e:
+            logger.debug(f"调整 QQ 官方文件上传超时失败（继续使用平台默认值）: {e}")
 
     def _reserve_quota(self, event: AstrMessageEvent) -> tuple[bool, str, bool]:
         """
@@ -262,7 +264,10 @@ class JMCosmosPlugin(Star):
             yield event.plain_result(f"⏳ 开始下载本子 {album_id}，请稍候...")
 
             # 如果配置了发送封面预览，获取详情和封面（预览失败不应中断下载）
-            if self.config_manager.send_cover_preview:
+            if (
+                self.config_manager.send_cover_preview
+                and event.get_platform_name() != "qq_official"
+            ):
                 try:
                     detail = await self.browser.get_album_detail(album_id)
                 except Exception as preview_err:
@@ -356,10 +361,9 @@ class JMCosmosPlugin(Star):
                     ]
                 )
 
-                # QQ 官方的耗时任务最终文件需走主动发送，避免被动回复超限。
-                if await self._send_qqofficial_file(event, file_chain):
-                    pass
-                elif self.config_manager.auto_recall_enabled:
+                self._prepare_platform_file_send(event)
+
+                if self.config_manager.auto_recall_enabled:
                     await send_with_recall(
                         event,
                         file_chain,
@@ -514,10 +518,9 @@ class JMCosmosPlugin(Star):
                     ]
                 )
 
-                # QQ 官方的耗时任务最终文件需走主动发送，避免被动回复超限。
-                if await self._send_qqofficial_file(event, file_chain):
-                    pass
-                elif self.config_manager.auto_recall_enabled:
+                self._prepare_platform_file_send(event)
+
+                if self.config_manager.auto_recall_enabled:
                     await send_with_recall(
                         event,
                         file_chain,
@@ -652,7 +655,10 @@ class JMCosmosPlugin(Star):
                 return
 
             # 根据配置决定是否发送封面图片
-            if self.config_manager.send_cover_preview:
+            if (
+                self.config_manager.send_cover_preview
+                and event.get_platform_name() != "qq_official"
+            ):
                 cover_dir = self.config_manager.download_dir / "covers"
                 cover_path = await self.browser.get_album_cover(album_id, cover_dir)
 
@@ -1282,9 +1288,9 @@ class JMCosmosPlugin(Star):
                 ]
             )
 
-            if await self._send_qqofficial_file(event, file_chain):
-                pass
-            elif self.config_manager.auto_recall_enabled:
+            self._prepare_platform_file_send(event)
+
+            if self.config_manager.auto_recall_enabled:
                 await send_with_recall(
                     event, file_chain, self.config_manager.auto_recall_delay
                 )
