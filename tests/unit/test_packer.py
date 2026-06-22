@@ -5,6 +5,7 @@
 """
 
 import zipfile
+import os
 from pathlib import Path
 
 
@@ -108,6 +109,64 @@ class TestJMPackerZip:
             names = zf.namelist()
             # 检查包含子目录路径
             assert any("chapter1" in name for name in names)
+
+    def test_pack_zip_into_independent_size_groups(self, temp_dir):
+        """超过阈值时每卷均独立可读，且文件不重复不丢失"""
+        from core.packer import JMPacker
+
+        source_dir = temp_dir / "split_source"
+        source_dir.mkdir()
+        expected = []
+        for index in range(3):
+            path = source_dir / f"{index + 1:03d}.jpg"
+            path.write_bytes(os.urandom(700 * 1024))
+            expected.append(path.name)
+
+        result = JMPacker(pack_format="zip").pack(
+            source_dir, "split_output", temp_dir, max_file_size_mb=1
+        )
+
+        assert result.success is True
+        assert len(result.output_paths) == 3
+        assert [path.name for path in result.output_paths] == [
+            "split_output_part1.zip",
+            "split_output_part2.zip",
+            "split_output_part3.zip",
+        ]
+        archived = []
+        for output_path in result.output_paths:
+            with zipfile.ZipFile(output_path, "r") as zf:
+                archived.extend(zf.namelist())
+        assert archived == expected
+
+    def test_encrypted_zip_size_groups_use_same_password(self, temp_dir):
+        """加密分卷均使用相同密码且可独立读取"""
+        import pyzipper
+
+        from core.packer import JMPacker
+
+        source_dir = temp_dir / "encrypted_split_source"
+        source_dir.mkdir()
+        for index in range(2):
+            (source_dir / f"{index + 1:03d}.jpg").write_bytes(
+                os.urandom(700 * 1024)
+            )
+
+        result = JMPacker(pack_format="zip", password="same-password").pack(
+            source_dir, "encrypted_split", temp_dir, max_file_size_mb=1
+        )
+
+        assert result.success is True
+        assert result.encrypted is True
+        assert len(result.output_paths) == 2
+        names = []
+        for output_path in result.output_paths:
+            with pyzipper.AESZipFile(output_path, "r") as zf:
+                zf.setpassword(b"same-password")
+                member = zf.namelist()[0]
+                assert zf.read(member)
+                names.append(member)
+        assert names == ["001.jpg", "002.jpg"]
 
 
 class TestJMPackerErrors:

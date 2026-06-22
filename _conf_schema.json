@@ -187,5 +187,17 @@
     "description": "QQ官方平台最大分卷数",
     "hint": "QQ官方被动回复限制约5条/用户消息。当预估分卷数超过此值时，自动提高单卷大小上限以减少卷数(可能导致单卷过大触发413)。设为0不限制卷数。仅QQ官方平台生效",
     "default": 5
+  },
+  "telegram_upload_timeout": {
+    "type": "int",
+    "description": "Telegram 文件上传超时（秒）",
+    "hint": "Telegram SDK 默认媒体上传写入超时较短，大文件或代理网络下容易出现 WriteTimeout。建议 120-300 秒，默认 180 秒",
+    "default": 180
+  },
+  "telegram_file_size_limit_mb": {
+    "type": "int",
+    "description": "Telegram 单卷文件大小（MB）",
+    "hint": "Telegram 文件上传经过慢速代理时，大文件可能触发 WriteTimeout。超过此值将拆成多个独立 ZIP/PDF 依次发送；默认 5MB，设为 0 禁用分卷",
+    "default": 5
   }
 }

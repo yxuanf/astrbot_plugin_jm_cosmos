@@ -23,6 +23,10 @@ from .core import (
     classify_exception,
 )
 from .utils import MessageFormatter, generate_album_filename, send_with_recall
+from .utils.platform import (
+    configure_telegram_upload_timeout,
+    get_platform_file_size_limit_mb,
+)
 
 # 插件名称常量
 PLUGIN_NAME = "jm_cosmos2"
@@ -192,39 +196,44 @@ class JMCosmosPlugin(Star):
                 logger.debug(f"调整 QQ 官方文件上传超时失败（继续使用平台默认值）: {e}")
 
         elif pn == "telegram":
-            # python-telegram-bot 的 httpx 默认 write 超时约 20s，
-            # 数 MB 的 ZIP/PDF 上传到 Telegram Bot API 时容易 WriteTimeout。
-            # 提升底層 httpx 客户端超时，不改动消息内容或发送策略。
+            # python-telegram-bot 对媒体上传使用独立的 media_write_timeout；
+            # ExtBot._request[1] 才是 send_document 使用的 API 请求器。
             try:
                 client = getattr(event, "client", None)
-                if client is None:
-                    return
-                req = getattr(client, "_request", None)
-                if req is None:
-                    return
-                http = getattr(req, "_client", None)
-                if http is None:
-                    return
-                import httpx
-
-                http.timeout = httpx.Timeout(120.0, write=120.0, connect=10.0)
-                logger.info("Telegram 平台：文件上传超时已调整为 120 秒")
+                timeout = self.config_manager.telegram_upload_timeout
+                if client is not None and configure_telegram_upload_timeout(
+                    client, timeout
+                ):
+                    logger.info(f"Telegram 平台：文件上传超时已调整为 {timeout} 秒")
+                else:
+                    logger.warning(
+                        "未识别 Telegram API 请求器，继续使用平台默认上传超时"
+                    )
             except Exception as e:
-                logger.debug(
+                logger.warning(
                     f"调整 Telegram 文件上传超时失败（继续使用平台默认值）: {e}"
                 )
 
     def _get_max_file_size_mb(self, event: AstrMessageEvent, save_path: "Path") -> int:
-        """计算打包分卷大小阈值，QQ 官方平台额外考虑被动回复次数限制。
+        """计算平台打包分卷阈值，QQ 额外考虑被动回复次数限制。
 
         Returns:
-            分卷阈值（MB），0 表示不拆分 / 非 QQ 平台。
+            分卷阈值（MB），0 表示不拆分。
         """
-        if event.get_platform_name() != "qq_official":
+        platform_name = event.get_platform_name()
+        limit = get_platform_file_size_limit_mb(
+            platform_name,
+            self.config_manager.qq_file_size_limit_mb,
+            self.config_manager.telegram_file_size_limit_mb,
+        )
+        if limit <= 0:
             return 0
 
-        limit = self.config_manager.qq_file_size_limit_mb
-        if limit <= 0:
+        # Telegram 没有 QQ 的单条事件被动回复卷数限制，直接使用配置阈值。
+        if platform_name == "telegram":
+            return limit
+
+        if platform_name != "qq_official":
             return 0
 
         max_parts = self.config_manager.qq_max_parts

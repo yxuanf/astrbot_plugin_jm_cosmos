@@ -109,6 +109,16 @@ class JMConfigManager:
         return self.plugin_config.get("qq_max_parts", 5)
 
     @property
+    def telegram_upload_timeout(self) -> int:
+        """Telegram 文件上传超时（秒）"""
+        return max(1, int(self.plugin_config.get("telegram_upload_timeout", 180)))
+
+    @property
+    def telegram_file_size_limit_mb(self) -> int:
+        """Telegram 单卷文件大小阈值（MB），0 表示不分卷"""
+        return max(0, int(self.plugin_config.get("telegram_file_size_limit_mb", 5)))
+
+    @property
     def auto_delete_after_send(self) -> bool:
         """发送后是否自动删除"""
         return self.plugin_config.get("auto_delete_after_send", True)

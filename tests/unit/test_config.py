@@ -66,6 +66,14 @@ class TestConfigManagerDefaults:
         """测试调试模式默认禁用"""
         assert config_manager.debug_mode is False
 
+    def test_telegram_upload_timeout_default(self, config_manager):
+        """测试 Telegram 上传超时默认值"""
+        assert config_manager.telegram_upload_timeout == 180
+
+    def test_telegram_file_size_limit_default(self, config_manager):
+        """测试 Telegram 默认按 5MB 分卷"""
+        assert config_manager.telegram_file_size_limit_mb == 5
+
 
 class TestAdminPermissions:
     """管理员权限测试"""
@@ -159,3 +167,27 @@ class TestCustomConfig:
         manager = JMConfigManager(config, data_dir)
         assert manager.use_proxy is True
         assert manager.proxy_url == "http://127.0.0.1:7890"
+
+    def test_custom_telegram_upload_timeout(self, data_dir):
+        """测试自定义 Telegram 上传超时"""
+        from core.base import JMConfigManager
+
+        manager = JMConfigManager({"telegram_upload_timeout": 300}, data_dir)
+        assert manager.telegram_upload_timeout == 300
+
+    def test_custom_and_disabled_telegram_file_size_limit(self, data_dir):
+        """测试自定义及禁用 Telegram 分卷"""
+        from core.base import JMConfigManager
+
+        assert (
+            JMConfigManager(
+                {"telegram_file_size_limit_mb": 8}, data_dir
+            ).telegram_file_size_limit_mb
+            == 8
+        )
+        assert (
+            JMConfigManager(
+                {"telegram_file_size_limit_mb": 0}, data_dir
+            ).telegram_file_size_limit_mb
+            == 0
+        )

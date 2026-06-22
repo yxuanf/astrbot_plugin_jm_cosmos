@@ -8,6 +8,8 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from astrbot.api import logger
+
 try:
     import pyzipper
 
@@ -479,6 +481,12 @@ class JMPacker:
 
         for fp in files:
             f_size = fp.stat().st_size
+            if f_size > max_bytes:
+                logger.warning(
+                    f"单个图片文件超过分卷阈值，将单独成卷: {fp.name} "
+                    f"({f_size / 1024 / 1024:.2f}MB > "
+                    f"{max_bytes / 1024 / 1024:.2f}MB)"
+                )
             if current_group and current_size + f_size > max_bytes:
                 groups.append(current_group)
                 current_group = []
