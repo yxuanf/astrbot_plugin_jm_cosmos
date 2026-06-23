@@ -11,6 +11,7 @@ assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
 generate_album_filename = _MODULE.generate_album_filename
+generate_sent_filename = _MODULE.generate_sent_filename
 
 
 def test_telegram_metadata_filename():
@@ -75,3 +76,26 @@ def test_legacy_filename_remains_id_and_timestamp(monkeypatch):
         )
         == "123_Ch2_1700000000#PWsecret"
     )
+
+
+def test_telegram_multi_part_filename_keeps_part_number_at_front():
+    original = "今晚與莫娜無事生非" * 10 + "-なンとか_part2.zip"
+
+    sent = generate_sent_filename(
+        original,
+        "telegram",
+        part_index=2,
+        total_parts=3,
+    )
+
+    assert sent.startswith("part2of3_")
+    assert sent.endswith("-なンとか.zip")
+    assert "_part2.zip" not in sent
+
+
+def test_sent_filename_keeps_single_file_and_other_platforms_unchanged():
+    single = "测试本子-测试作者.zip"
+    part = "测试本子-测试作者_part1.zip"
+
+    assert generate_sent_filename(single, "telegram") == single
+    assert generate_sent_filename(part, "qq_official", 1, 3) == part

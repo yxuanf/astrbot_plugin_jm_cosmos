@@ -22,7 +22,12 @@ from .core import (
     SubscriptionManager,
     classify_exception,
 )
-from .utils import MessageFormatter, generate_album_filename, send_with_recall
+from .utils import (
+    MessageFormatter,
+    generate_album_filename,
+    generate_sent_filename,
+    send_with_recall,
+)
 from .utils.platform import (
     configure_telegram_upload_timeout,
     get_platform_file_size_limit_mb,
@@ -1294,8 +1299,9 @@ class JMCosmosPlugin(Star):
         self._prepare_platform_file_send(event)
         paths = pack_result.output_paths
         multi = len(paths) > 1
+        platform_name = event.get_platform_name()
         # QQ 官方被动回复限制 ~5 条/用户消息，多卷时优先尝试主动推送
-        qq_active = multi and event.get_platform_name() == "qq_official"
+        qq_active = multi and platform_name == "qq_official"
         qq_active_ok = qq_active  # 首卷先尝试主动推送，失败则后续全部回退
 
         for i, path in enumerate(paths, 1):
@@ -1312,7 +1318,12 @@ class JMCosmosPlugin(Star):
                         prefix + result_msg if i == 1 else prefix.rstrip()
                     ),
                     Comp.File(
-                        name=path.name,
+                        name=generate_sent_filename(
+                            path.name,
+                            platform_name,
+                            part_index=i,
+                            total_parts=len(paths),
+                        ),
                         file=str(path),
                     ),
                 ]

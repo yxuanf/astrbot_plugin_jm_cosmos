@@ -2,6 +2,7 @@
 
 import re
 import time
+from pathlib import Path
 
 
 _INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f\x7f]')
@@ -57,6 +58,25 @@ def _generate_metadata_filename(
     safe_title = _truncate_utf8(safe_title, title_budget) or f"JM{album_id}"
 
     return f"{safe_title}-{safe_author}{password_hint}"
+
+
+def generate_sent_filename(
+    original_name: str,
+    platform_name: str,
+    part_index: int = 1,
+    total_parts: int = 1,
+) -> str:
+    """生成平台实际收到的文件名。
+
+    Telegram 客户端会在界面中截断长文件名的尾部。多卷文件将卷号移到
+    最前面，确保用户始终能看到当前批次；磁盘文件及其他平台维持原名。
+    """
+    if platform_name != "telegram" or total_parts <= 1:
+        return original_name
+
+    path = Path(original_name)
+    stem = re.sub(r"_part\d+$", "", path.stem)
+    return f"part{part_index}of{total_parts}_{stem}{path.suffix}"
 
 
 def generate_album_filename(
