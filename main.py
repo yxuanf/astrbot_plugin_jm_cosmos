@@ -391,10 +391,17 @@ class JMCosmosPlugin(Star):
             download_succeeded = True
 
             # 生成文件名
+            filename_kwargs = {}
+            if event.get_platform_name() == "telegram":
+                filename_kwargs = {
+                    "title": result.title,
+                    "author": result.author,
+                }
             output_name = generate_album_filename(
                 album_id=album_id,
                 password=self.config_manager.pack_password,
                 show_password=self.config_manager.filename_show_password,
+                **filename_kwargs,
             )
 
             # 打包文件
